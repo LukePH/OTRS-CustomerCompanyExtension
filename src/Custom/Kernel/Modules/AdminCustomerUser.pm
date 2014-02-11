@@ -24,6 +24,7 @@ use strict;
 use warnings;
 
 use Kernel::System::CustomerUser;
+use Kernel::System::CustomerGroup;
 use Kernel::System::CustomerCompany;
 use Kernel::System::Valid;
 use Kernel::System::CheckItem;
@@ -51,13 +52,12 @@ sub new {
         }
     }
 
-    # create additonal objects
+    # create additional objects
     $Self->{CustomerUserObject}    = Kernel::System::CustomerUser->new(%Param);
+    $Self->{CustomerGroupObject}   = Kernel::System::CustomerGroup->new(%Param);
     $Self->{CustomerCompanyObject} = Kernel::System::CustomerCompany->new(%Param);
     $Self->{ValidObject}           = Kernel::System::Valid->new(%Param);
-    #OA: Create Service Object
-    $Self->{ServiceObject}         = Kernel::System::Service->new(%Param);
-    #$Self->{LogObject}->Log( Priority => 'notice', Message => "Created Service Object");
+
     return $Self;
 }
 
@@ -70,7 +70,7 @@ sub Run {
     $Search
         ||= $Self->{ConfigObject}->Get('AdminCustomerUser::RunInitialWildcardSearch') ? '*' : '';
 
-    #create local object
+    # create local object
     my $CheckItemObject = Kernel::System::CheckItem->new( %{$Self} );
 
     my $NavBar = '';
@@ -82,6 +82,127 @@ sub Run {
         $NavBar .= $Self->{LayoutObject}->NavigationBar(
             Type => $Nav eq 'Agent' ? 'Customers' : 'Admin',
         );
+    }
+
+    # check the permission for the SwitchToCustomer feature
+    if ( $Self->{ConfigObject}->Get('SwitchToCustomer') ) {
+
+        # get the group id which is allowed to use the switch to customer feature
+        my $SwitchToCustomerGroupID = $Self->{GroupObject}->GroupLookup(
+            Group => $Self->{ConfigObject}->Get('SwitchToCustomer::PermissionGroup'),
+        );
+
+        # get user groups, where the user has the rw privilege
+        my %Groups = $Self->{GroupObject}->GroupMemberList(
+            UserID => $Self->{UserID},
+            Type   => 'rw',
+            Result => 'HASH',
+        );
+
+        # if the user is a member in this group he can access the feature
+        if ( $Groups{$SwitchToCustomerGroupID} ) {
+            $Self->{SwitchToCustomerPermission} = 1;
+        }
+    }
+
+    # ------------------------------------------------------------ #
+    #  switch to customer
+    # ------------------------------------------------------------ #
+    if (
+        $Self->{Subaction} eq 'Switch'
+        && $Self->{ConfigObject}->Get('SwitchToCustomer')
+        && $Self->{SwitchToCustomerPermission}
+        )
+    {
+
+        # challenge token check for write action
+        $Self->{LayoutObject}->ChallengeTokenCheck();
+
+        # get user data
+        my $UserID = $Self->{ParamObject}->GetParam( Param => 'ID' ) || '';
+        my %UserData = $Self->{CustomerUserObject}->CustomerUserDataGet(
+            User  => $UserID,
+            Valid => 1,
+        );
+
+        # get groups rw/ro
+        for my $Type (qw(rw ro)) {
+            my %GroupData = $Self->{CustomerGroupObject}->GroupMemberList(
+                Result => 'HASH',
+                Type   => $Type,
+                UserID => $UserData{UserID},
+            );
+            for my $GroupKey ( sort keys %GroupData ) {
+                if ( $Type eq 'rw' ) {
+                    $UserData{"UserIsGroup[$GroupData{$GroupKey}]"} = 'Yes';
+                }
+                else {
+                    $UserData{"UserIsGroupRo[$GroupData{$GroupKey}]"} = 'Yes';
+                }
+            }
+        }
+
+        # create new session id
+        my $NewSessionID = $Self->{SessionObject}->CreateSessionID(
+            %UserData,
+            UserLastRequest => $Self->{TimeObject}->SystemTime(),
+            UserType        => 'Customer',
+        );
+
+        # get customer interface session name
+        my $SessionName = $Self->{ConfigObject}->Get('CustomerPanelSessionName') || 'CSID';
+
+        # create a new LayoutObject with SessionIDCookie
+        my $Expires = '+' . $Self->{ConfigObject}->Get('SessionMaxTime') . 's';
+        if ( !$Self->{ConfigObject}->Get('SessionUseCookieAfterBrowserClose') ) {
+            $Expires = '';
+        }
+
+        my $SecureAttribute;
+        if ( $Self->{ConfigObject}->Get('HttpType') eq 'https' ) {
+
+            # Restrict Cookie to HTTPS if it is used.
+            $SecureAttribute = 1;
+        }
+
+        my $LayoutObject = Kernel::Output::HTML::Layout->new(
+            %{$Self},
+            SetCookies => {
+                SessionIDCookie => $Self->{ParamObject}->SetCookie(
+                    Key      => $SessionName,
+                    Value    => $NewSessionID,
+                    Expires  => $Expires,
+                    Path     => $Self->{ConfigObject}->Get('ScriptAlias'),
+                    Secure   => scalar $SecureAttribute,
+                    HTTPOnly => 1,
+                ),
+            },
+            SessionID   => $NewSessionID,
+            SessionName => $Self->{ConfigObject}->Get('SessionName'),
+        );
+
+        # log event
+        $Self->{LogObject}->Log(
+            Priority => 'notice',
+            Message =>
+                "Switched from Agent to Customer ($Self->{UserLogin} -=> $UserData{UserLogin})",
+        );
+
+        # build URL to customer interface
+        my $URL = $Self->{ConfigObject}->Get('HttpType')
+            . '://'
+            . $Self->{ConfigObject}->Get('FQDN')
+            . '/'
+            . $Self->{ConfigObject}->Get('ScriptAlias')
+            . 'customer.pl';
+
+        # if no sessions are used we attach the session as URL parameter
+        if ( !$Self->{ConfigObject}->Get('SessionUseCookie') ) {
+            $URL .= "?$SessionName=$NewSessionID";
+        }
+
+        # redirect to customer interface with new session id
+        return $LayoutObject->Redirect( ExtURL => $URL );
     }
 
     # search user list
@@ -165,6 +286,10 @@ sub Run {
     # OA: On CustomerUser save (edit)
     # ------------------------------------------------------------ #
     elsif ( $Self->{Subaction} eq 'ChangeAction' ) {
+
+        # challenge token check for write action
+        $Self->{LayoutObject}->ChallengeTokenCheck();
+
         my $Note = '';
         my ( %GetParam, %Errors );
         for my $Entry ( @{ $Self->{ConfigObject}->Get($Source)->{Map} } ) {
@@ -195,7 +320,6 @@ sub Run {
                 %GetParam,
                 UserID => $Self->{UserID},
             );
-#            $Self->{LogObject}->Log( Priority => 'notice', Message => "\$Update: " . $Update);
             if ($Update) {
 
             $Self->{LogObject}->Log( Priority => 'notice', Message => "Updated user: " .  $GetParam{UserLogin} );
@@ -249,7 +373,7 @@ sub Run {
 	 	#OA: Done service association on CustomerUser create	
                 # update preferences
                 my %Preferences = %{ $Self->{ConfigObject}->Get('CustomerPreferencesGroups') };
-                for my $Group ( keys %Preferences ) {
+                for my $Group ( sort keys %Preferences ) {
                     next if $Group eq 'Password';
 
                     # get user data
@@ -335,7 +459,8 @@ sub Run {
     # ------------------------------------------------------------ #
     elsif ( $Self->{Subaction} eq 'Add' ) {
         my %GetParam;
-        $GetParam{UserLogin} = $Self->{ParamObject}->GetParam( Param => 'UserLogin' ) || '';
+        $GetParam{UserLogin}  = $Self->{ParamObject}->GetParam( Param => 'UserLogin' )  || '';
+        $GetParam{CustomerID} = $Self->{ParamObject}->GetParam( Param => 'CustomerID' ) || '';
         my $Output = $NavBar;
         $Output .= $Self->_Edit(
             Nav    => $Nav,
@@ -359,6 +484,10 @@ sub Run {
     # add action
     # ------------------------------------------------------------ #
     elsif ( $Self->{Subaction} eq 'AddAction' ) {
+
+        # challenge token check for write action
+        $Self->{LayoutObject}->ChallengeTokenCheck();
+
         my $Note = '';
         my ( %GetParam, %Errors );
 
@@ -432,10 +561,10 @@ sub Run {
 		        }
 		}
 	 	#OA: Done service association on CustomerUser create	
-			
+
                 # update preferences
                 my %Preferences = %{ $Self->{ConfigObject}->Get('CustomerPreferencesGroups') };
-                for my $Group ( keys %Preferences ) {
+                for my $Group ( sort keys %Preferences ) {
                     next if $Group eq 'Password';
 
                     # get user data
@@ -502,7 +631,7 @@ sub Run {
                     my $UserQuote     = $Self->{LayoutObject}->Ascii2Html( Text => $User );
                     if ( $Self->{ConfigObject}->Get('Frontend::Module')->{AgentTicketPhone} ) {
                         $URL
-                            .= "<a href=\"\$Env{\"CGIHandle\"}?Action=AgentTicketPhone;Subaction=StoreNew;ExpandCustomerName=2;CustomerUser=$UserHTMLQuote\">"
+                            .= "<a href=\"\$Env{\"CGIHandle\"}?Action=AgentTicketPhone;Subaction=StoreNew;ExpandCustomerName=2;CustomerUser=$UserHTMLQuote;\$QEnv{\"ChallengeTokenParam\"}\">"
                             . $Self->{LayoutObject}->{LanguageObject}->Get('New phone ticket')
                             . "</a>";
                     }
@@ -511,7 +640,7 @@ sub Run {
                             $URL .= " - ";
                         }
                         $URL
-                            .= "<a href=\"\$Env{\"CGIHandle\"}?Action=AgentTicketEmail;Subaction=StoreNew;ExpandCustomerName=2;CustomerUser=$UserHTMLQuote\">"
+                            .= "<a href=\"\$Env{\"CGIHandle\"}?Action=AgentTicketEmail;Subaction=StoreNew;ExpandCustomerName=2;CustomerUser=$UserHTMLQuote;\$QEnv{\"ChallengeTokenParam\"}\">"
                             . $Self->{LayoutObject}->{LanguageObject}->Get('New email ticket')
                             . "</a>";
                     }
@@ -602,13 +731,6 @@ sub Run {
 sub _Overview {
     my ( $Self, %Param ) = @_;
 
-    # build source string
-    $Param{SourceOption} = $Self->{LayoutObject}->BuildSelection(
-        Data       => { $Self->{CustomerUserObject}->CustomerSourceList() },
-        Name       => 'Source',
-        SelectedID => $Param{Source} || '',
-    );
-
     $Self->{LayoutObject}->Block(
         Name => 'Overview',
         Data => \%Param,
@@ -619,15 +741,33 @@ sub _Overview {
         Name => 'ActionSearch',
         Data => \%Param,
     );
-    $Self->{LayoutObject}->Block(
-        Name => 'ActionAdd',
-        Data => \%Param,
+
+    # get writable data sources
+    my %CustomerSource = $Self->{CustomerUserObject}->CustomerSourceList(
+        ReadOnly => 0,
     );
+
+    # only show Add option if we have at least one writable backend
+    if ( scalar keys %CustomerSource ) {
+        $Param{SourceOption} = $Self->{LayoutObject}->BuildSelection(
+            Data       => { %CustomerSource, },
+            Name       => 'Source',
+            SelectedID => $Param{Source} || '',
+        );
+
+        $Self->{LayoutObject}->Block(
+            Name => 'ActionAdd',
+            Data => \%Param,
+        );
+    }
 
     $Self->{LayoutObject}->Block(
         Name => 'OverviewHeader',
         Data => {},
     );
+
+    # when there is no data to show, a message is displayed on the table with this colspan
+    my $ColSpan = 6;
 
     if ( $Param{Search} ) {
         my %List = $Self->{CustomerUserObject}->CustomerSearch(
@@ -639,6 +779,14 @@ sub _Overview {
             Data => \%Param,
         );
 
+        if ( $Self->{ConfigObject}->Get('SwitchToCustomer') && $Self->{SwitchToCustomerPermission} )
+        {
+            $ColSpan = 7;
+            $Self->{LayoutObject}->Block(
+                Name => 'OverviewResultSwitchToCustomer',
+            );
+        }
+
         # if there are results to show
         if (%List) {
 
@@ -647,11 +795,16 @@ sub _Overview {
             for my $ListKey ( sort { lc($a) cmp lc($b) } keys %List ) {
 
                 my %UserData = $Self->{CustomerUserObject}->CustomerUserDataGet( User => $ListKey );
+                $UserData{UserFullname} = $Self->{CustomerUserObject}->CustomerName(
+                    UserLogin => $UserData{UserLogin},
+                );
+
                 $Self->{LayoutObject}->Block(
                     Name => 'OverviewResultRow',
                     Data => {
                         Valid => $ValidList{ $UserData{ValidID} || '' } || '-',
-                        Search => $Param{Search},
+                        Search      => $Param{Search},
+                        CustomerKey => $ListKey,
                         %UserData,
                     },
                 );
@@ -659,7 +812,8 @@ sub _Overview {
                     $Self->{LayoutObject}->Block(
                         Name => 'OverviewResultRowLinkNone',
                         Data => {
-                            Search => $Param{Search},
+                            Search      => $Param{Search},
+                            CustomerKey => $ListKey,
                             %UserData,
                         },
                     );
@@ -668,8 +822,24 @@ sub _Overview {
                     $Self->{LayoutObject}->Block(
                         Name => 'OverviewResultRowLink',
                         Data => {
+                            Search      => $Param{Search},
+                            Nav         => $Param{Nav},
+                            CustomerKey => $ListKey,
+                            %UserData,
+                        },
+                    );
+                }
+
+                if (
+                    $Self->{ConfigObject}->Get('SwitchToCustomer')
+                    && $Self->{SwitchToCustomerPermission}
+                    && $Param{Nav} ne 'None'
+                    )
+                {
+                    $Self->{LayoutObject}->Block(
+                        Name => 'OverviewResultRowSwitchToCustomer',
+                        Data => {
                             Search => $Param{Search},
-                            Nav    => $Param{Nav},
                             %UserData,
                         },
                     );
@@ -681,7 +851,9 @@ sub _Overview {
         else {
             $Self->{LayoutObject}->Block(
                 Name => 'NoDataFoundMsg',
-                Data => {},
+                Data => {
+                    ColSpan => $ColSpan,
+                },
             );
         }
     }
@@ -768,6 +940,9 @@ sub _Edit {
             $Param{RequiredLabelCharacter} = '';
         }
 
+        # set empty string
+        $Param{Errors}->{ $Entry->[0] . 'Invalid' } ||= '';
+
         # add class to validate emails
         if ( $Entry->[0] eq 'UserEmail' ) {
             $Param{RequiredClass} .= ' Validate_Email';
@@ -787,19 +962,19 @@ sub _Edit {
                 = $Self->{ConfigObject}->Get( $Param{Source} )->{Selections}->{ $Entry->[0] };
 
             # make sure the encoding stamp is set
-            for my $Key ( keys %{$SelectionsData} ) {
-                $SelectionsData->{$Key} = $Self->{EncodeObject}->Encode( $SelectionsData->{$Key} );
+            for my $Key ( sort keys %{$SelectionsData} ) {
+                $SelectionsData->{$Key}
+                    = $Self->{EncodeObject}->EncodeInput( $SelectionsData->{$Key} );
             }
 
+            # build option string
             $Param{Option} = $Self->{LayoutObject}->BuildSelection(
                 Data        => $SelectionsData,
                 Name        => $Entry->[0],
                 Translation => 0,
                 SelectedID  => $Param{ $Entry->[0] },
-                Class => $Param{RequiredClass} . ' ' . $Param{Errors}->{ $Entry->[0] . 'Invalid' }
-                    || '',
+                Class => $Param{RequiredClass} . ' ' . $Param{Errors}->{ $Entry->[0] . 'Invalid' },
             );
-
         }
         elsif ( $Entry->[0] =~ /^ValidID/i ) {
 
@@ -814,8 +989,7 @@ sub _Edit {
                 Data       => { $Self->{ValidObject}->ValidList(), },
                 Name       => $Entry->[0],
                 SelectedID => defined( $Param{ $Entry->[0] } ) ? $Param{ $Entry->[0] } : 1,
-                Class => $Param{RequiredClass} || ''
-                    . ' ' . $Param{Errors}->{ $Entry->[0] . 'Invalid' } || '',
+                Class => $Param{RequiredClass} . ' ' . $Param{Errors}->{ $Entry->[0] . 'Invalid' },
             );
         }
         elsif (
@@ -841,13 +1015,13 @@ sub _Edit {
             if ( $Param{RequiredClass} ) {
                 $Param{RequiredClass} = 'Validate_Required';
             }
+
             $Param{Option} = $Self->{LayoutObject}->BuildSelection(
                 Data       => \%CompanyList,
                 Name       => $Entry->[0],
                 Max        => 80,
-                SelectedID => $Param{ $Entry->[0] },
-                Class      => $Param{RequiredClass} . ' '
-                    . ( $Param{Errors}->{ $Entry->[0] . 'Invalid' } || '' ),
+                SelectedID => $Param{ $Entry->[0] } || $Param{CustomerID},
+                Class => $Param{RequiredClass} . ' ' . $Param{Errors}->{ $Entry->[0] . 'Invalid' },
             );
         }
         else {
@@ -906,41 +1080,59 @@ sub _Edit {
     }
     my $PreferencesUsed = $Self->{ConfigObject}->Get( $Param{Source} )->{AdminSetPreferences};
     if ( ( defined $PreferencesUsed && $PreferencesUsed != 0 ) || !defined $PreferencesUsed ) {
+
+        # extract groups
         my @Groups = @{ $Self->{ConfigObject}->Get('CustomerPreferencesView') };
+
         for my $Column (@Groups) {
+
             my %Data;
             my %Preferences = %{ $Self->{ConfigObject}->Get('CustomerPreferencesGroups') };
-            for my $Group ( keys %Preferences ) {
-                if ( $Preferences{$Group}->{Column} eq $Column ) {
-                    if ( $Data{ $Preferences{$Group}->{Prio} } ) {
-                        for ( 1 .. 151 ) {
-                            $Preferences{$Group}->{Prio}++;
-                            if ( !$Data{ $Preferences{$Group}->{Prio} } ) {
-                                $Data{ $Preferences{$Group}->{Prio} } = $Group;
-                                last;
-                            }
-                        }
+
+            GROUP:
+            for my $Group ( sort keys %Preferences ) {
+
+                next GROUP if !$Group;
+                next GROUP if !$Preferences{$Group}->{Column};
+                next GROUP if $Preferences{$Group}->{Column} ne $Column;
+
+                if ( $Data{ $Preferences{$Group}->{Prio} } ) {
+
+                    COUNT:
+                    for my $Count ( 1 .. 151 ) {
+
+                        $Preferences{$Group}->{Prio}++;
+
+                        next COUNT if $Data{ $Preferences{$Group}->{Prio} };
+
+                        $Data{ $Preferences{$Group}->{Prio} } = $Group;
+
+                        last COUNT;
                     }
-                    $Data{ $Preferences{$Group}->{Prio} } = $Group;
                 }
+
+                $Data{ $Preferences{$Group}->{Prio} } = $Group;
             }
 
             # sort
-            for my $Key ( keys %Data ) {
-                $Data{ sprintf( "%07d", $Key ) } = $Data{$Key};
+            for my $Key ( sort keys %Data ) {
+                $Data{ sprintf "%07d", $Key } = $Data{$Key};
                 delete $Data{$Key};
             }
 
             # show each preferences setting
             for my $Prio ( sort keys %Data ) {
+
                 my $Group = $Data{$Prio};
                 if ( !$Self->{ConfigObject}->{CustomerPreferencesGroups}->{$Group} ) {
                     next;
                 }
+
                 my %Preference = %{ $Self->{ConfigObject}->{CustomerPreferencesGroups}->{$Group} };
                 if ( $Group eq 'Password' ) {
                     next;
                 }
+
                 my $Module = $Preference{Module}
                     || 'Kernel::Output::HTML::CustomerPreferencesGeneric';
 
@@ -960,7 +1152,7 @@ sub _Edit {
                                 Data => {%Param},
                             );
                             if (
-                                ref $ParamItem->{Data}   eq 'HASH'
+                                ref $ParamItem->{Data} eq 'HASH'
                                 || ref $Preference{Data} eq 'HASH'
                                 )
                             {
@@ -986,7 +1178,6 @@ sub _Edit {
                 }
             }
         }
-
     }
 
     if ( $Param{Nav} eq 'None' ) {
@@ -995,7 +1186,7 @@ sub _Edit {
 
     return $Self->{LayoutObject}->Output(
         TemplateFile => 'AdminCustomerUser',
-        Data         => \%Param
+        Data         => \%Param,
     );
 }
 

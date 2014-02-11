@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<otrs_package version="1.1">
+    <Name>WPCustomerCompanyExtension</Name>
+    <Version>0.0.4</Version>
+    <Vendor>Wuerth Phoenix Srl</Vendor>
+    <URL>http://www.wuerth-phoenix.com</URL>
+    <License>GNU AFFERO GENERAL PUBLIC LICENSE Version 3, 19 November 2007</License>
+    <ChangeLog Version="0.0.1" Date="2011-12-05 12:20:00">First package release.</ChangeLog>
+    <ChangeLog Version="0.0.2" Date="2011-12-16 14:20:00">Fixed Service associations for newly created customers</ChangeLog>
+    <ChangeLog Version="0.0.3" Date="2012-06-15 12:20:00">Merged with groups association.</ChangeLog>
+    <Description Lang="en">Allow services and groups to be associated to Customer Companies.</Description>
+    <Framework>3.3.4</Framework>
+    <IntroInstall Lang="en" Title="Thank you!" Type="post">You are about to install the WPCustomerCompanyExtension OTRS Package. This will allow to link Customer companies to services. </IntroInstall>
+    <BuildDate>2014-01-10 18:32:59</BuildDate>
+    <BuildHost>yourhost.example.com</BuildHost>
+    <Filelist>
+        <File Location="Custom/Kernel/Modules/AdminCustomerUser.pm" Permission="644" Encode="Base64"></File>
+        <File Location="Kernel/Config/Files/WPLinkCompanyToService.pm" Permission="644" Encode="Base64"></File>
+        <File Location="Kernel/Config/Files/WPLinkCompanyToGroup.pm" Permission="644" Encode="Base64"></File>
+        <File Location="Kernel/Modules/AdminCustomerCompanyService.pm" Permission="644" Encode="Base64"></File>
+        <File Location="Kernel/Modules/AdminCustomerCompanyGroup.pm" Permission="644" Encode="Base64"></File>
+        <File Location="Kernel/Output/HTML/Standard/AdminCustomerCompanyService.dtl" Permission="644" Encode="Base64"></File>
+        <File Location="Kernel/Output/HTML/Standard/AdminCustomerCompanyGroup.dtl" Permission="644" Encode="Base64"></File>
+    </Filelist>
+</otrs_package>
